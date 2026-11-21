@@ -5,12 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}我的 RSS{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
+  <script defer src="{{ url_for('static', filename='reader.js') }}"></script>
 </head>
 <body>
-  <header><nav><a class="brand" href="{{ url_for('index') }}">我的 RSS</a>
-    <a href="{{ url_for('index', view='unread') }}">未读</a>
-    <a href="{{ url_for('stats') }}">阅读统计</a>
-    <a href="{{ url_for('combined_feed') }}">RSS</a>
+  <header><nav aria-label="主导航"><a class="brand" href="{{ url_for('index') }}"><span class="brand-mark" aria-hidden="true"></span>我的 RSS</a>
+    <a href="{{ url_for('index') }}" {% if request.endpoint == 'index' and view != 'archive' %}aria-current="page"{% endif %}>阅读</a>
+    <a href="{{ url_for('index', view='archive') }}" {% if view == 'archive' %}aria-current="page"{% endif %}>归档</a>
+    <a href="{{ url_for('stats') }}" {% if request.endpoint == 'stats' %}aria-current="page"{% endif %}>统计</a>
+    <a href="{{ url_for('library') }}" {% if request.endpoint == 'library' %}aria-current="page"{% endif %}>导入与导出</a>
   </nav></header>
   <main>{% block main %}{% endblock %}</main>
 </body>

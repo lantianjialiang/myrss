@@ -1,0 +1,2 @@
+{% if entry.link %}<a class="original-link" href="{{ entry.link }}" target="_blank" rel="noopener noreferrer">打开原文 ↗</a>{% endif %}
+{% if entry.body %}<div class="article-body">{{ entry.body | safe }}</div>{% else %}<p class="muted">订阅源未提供正文。</p>{% endif %}

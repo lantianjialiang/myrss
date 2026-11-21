@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}导入与导出 · 我的 RSS{% endblock %}
+{% block main %}
+<div class="management">
+  <h1>导入与导出</h1>
+  <div class="management-grid">
+    <section class="panel">
+      <h2>导出历史文章</h2>
+      <p class="muted">包含已归档的文章，也可选择已经取消的订阅。</p>
+      <form class="stack" method="get" action="{{ url_for('export_articles') }}">
+        <label>订阅范围<select name="feed">
+          <option value="">全部订阅</option>
+          {% for feed in feeds %}
+            <option value="{{ feed.id }}" {% if feed.id == selected %}selected{% endif %}>{{ feed.title }}（{{ feed.total }} 篇{% if not feed.active %}，已取消{% endif %}）</option>
+          {% endfor %}
+        </select></label>
+        <label>文件格式<select name="format"><option value="md">Markdown</option><option value="pdf">PDF</option></select></label>
+        <label>文件数量<select name="mode"><option value="single">合并成单个文件</option><option value="multiple">每篇一份，打包为 ZIP</option></select></label>
+        <button class="primary">下载文章</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>迁移订阅列表</h2>
+      <p class="muted">OPML 包含订阅名称和地址。导入会合并重复地址。</p>
+      <a class="button" href="{{ url_for('export_subscriptions') }}">导出 OPML</a>
+      <form class="stack import-form" method="post" enctype="multipart/form-data" action="{{ url_for('import_subscriptions') }}">
+        <input type="hidden" name="form_token" value="{{ form_token }}">
+        <label>选择 OPML 文件<input name="opml" type="file" accept=".opml,.xml,text/xml,application/xml" required></label>
+        <button class="primary">导入订阅</button>
+      </form>
+    </section>
+  </div>
+</div>
+{% endblock %}

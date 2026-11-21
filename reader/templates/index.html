@@ -4,63 +4,112 @@
 {%- endmacro %}
 {% block main %}
 <div class="layout">
-  <aside>
-    <h2>订阅源</h2>
-    <details {% if not feeds %}open{% endif %}>
-      <summary>添加订阅</summary>
-      <form method="post" action="{{ url_for('add_feed') }}" class="add">
-        {{ form_token_input() }}
-        <label>类型<select name="kind">{% for kind in source_types %}<option>{{ kind }}</option>{% endfor %}</select></label>
-        <label>地址或账号<input name="url" maxlength="2048" required placeholder="RSS、博客地址或 @账号"></label>
-        <button>添加</button>
-      </form>
-      <p class="muted">公众号可填 RSS 地址、Wechat2RSS 订阅 ID 或公众号栏目链接。</p>
-      <p class="muted">YouTube 可填 @账号或频道主页。哔哩哔哩和微博可填数字 UID 或带 UID 的主页链接。</p>
-    </details>
-    <a class="source {% if selected is none %}selected{% endif %}" href="{{ url_for('index', view='unread' if unread else none) }}">全部订阅 <span>{{ feeds | sum(attribute='unread') }}</span></a>
+  <aside class="sidebar">
+    <div class="sidebar-head"><h2>订阅源</h2><a class="small-link" href="{{ url_for('combined_feed') }}">聚合 RSS ↗</a></div>
+    {% if not archive %}
+      <details class="add-source" {% if not feeds %}open{% endif %}>
+        <summary>＋ 添加订阅</summary>
+        <form method="post" action="{{ url_for('add_feed') }}" class="stack">
+          {{ form_token_input() }}
+          <label>类型<select name="kind">{% for kind in source_types %}<option>{{ kind }}</option>{% endfor %}</select></label>
+          <label>地址或账号<input name="url" maxlength="2048" required placeholder="RSS、个人主页或 @账号"></label>
+          <button class="primary">添加订阅</button>
+        </form>
+        <p class="muted">公众号可填 RSS 地址、Wechat2RSS 订阅 ID 或公众号栏目链接。</p>
+        <p class="muted">YouTube 可填 @账号。哔哩哔哩和微博可填数字 UID 或带 UID 的主页链接。</p>
+      </details>
+    {% endif %}
+    <a class="source {% if selected is none %}selected{% endif %}" href="{{ url_for('index', view=view, day=day or none) }}">
+      <span>全部订阅</span><span class="count" {% if not archive %}data-unread-count="all"{% endif %}>{{ feeds | sum(attribute='total' if archive else 'unread') }}</span>
+    </a>
     {% for group in feeds | groupby('kind') %}
       <h3>{{ group.grouper }}</h3>
       {% for source in group.list %}
-        <a class="source {% if selected == source.id %}selected{% endif %}" href="{{ url_for('index', feed=source.id, view='unread' if unread else none) }}">{{ source.title }} <span>{{ source.unread }}</span></a>
-        {% if source.error %}<p class="error">{{ source.error }}</p>{% endif %}
-        {% if not source.updated and not source.error %}<p class="muted">等待首次刷新</p>{% endif %}
+        <a class="source {% if selected == source.id %}selected{% endif %}" href="{{ url_for('index', feed=source.id, view=view, day=day or none) }}">
+          <span>{{ source.title }}{% if not source.active %} <small>已取消</small>{% endif %}</span>
+          <span class="count" {% if not archive %}data-unread-count="{{ source.id }}"{% endif %}>{{ source.total if archive else source.unread }}</span>
+        </a>
+        {% if not archive and source.error %}<p class="error">{{ source.error }}</p>{% endif %}
+        {% if not archive and not source.updated and not source.error %}<p class="muted source-note">等待首次同步</p>{% endif %}
       {% endfor %}
     {% endfor %}
   </aside>
-  <section>
+  <section class="stream" aria-label="{{ '订阅归档' if archive else '文章列表' }}">
     {% set current = feeds | selectattr('id', 'equalto', selected) | first | default(none) %}
-    <div class="toolbar">
-      <h1>{{ current.title if current else ('未读文章' if unread else '全部文章') }}</h1>
-      <form method="post" action="{{ url_for('refresh_now') }}">
-        {{ form_token_input() }}
-        {% if current %}<input type="hidden" name="feed" value="{{ current.id }}">{% endif %}
-        <button>刷新{{ '此源' if current else '全部' }}</button>
-      </form>
-    </div>
-    {% if current %}
-      <div class="toolbar muted">
-        <span>最近同步：{{ current.updated | localtime or '尚未成功同步' }}</span>
-        <form method="post" action="{{ url_for('pause', feed_id=current.id) }}">
-          {{ form_token_input() }}
-          <button class="quiet">取消订阅</button>
+    {% set heading = '订阅归档' if archive else ('未读文章' if view == 'unread' else '全部文章') %}
+    <div class="stream-heading">
+      <div class="toolbar">
+        <h1>{{ current.title if current else heading }}</h1>
+        {% if archive %}
+          <a class="button" href="{{ url_for('library', feed=selected) }}">导出文章</a>
+        {% else %}
+          <div class="stream-controls">
+            <form method="post" action="{{ url_for('mark_all_read') }}">
+              {{ form_token_input() }}
+              <input type="hidden" name="view" value="{{ view }}">
+              {% if selected is not none %}<input type="hidden" name="feed" value="{{ selected }}">{% endif %}
+              {% set unread_count = current.unread if current else (feeds | sum(attribute='unread') if selected is none else 0) %}
+              <button data-mark-all="{{ selected if selected is not none else 'all' }}" {% if not unread_count %}disabled{% endif %}>{{ '此源全部标为已读' if current else '全部标为已读' }}</button>
+            </form>
+            <form method="post" action="{{ url_for('refresh_now') }}">
+              {{ form_token_input() }}
+              {% if current %}<input type="hidden" name="feed" value="{{ current.id }}">{% endif %}
+              <button>刷新{{ '此源' if current else '全部' }}</button>
+            </form>
+          </div>
+        {% endif %}
+      </div>
+      {% if archive %}
+        <form class="archive-filter" method="get" action="{{ url_for('index') }}">
+          <input type="hidden" name="view" value="archive">
+          {% if selected %}<input type="hidden" name="feed" value="{{ selected }}">{% endif %}
+          <label>首次同步日期 <input type="date" name="day" value="{{ day }}"></label>
+          <button>筛选</button>
+          {% if day %}<a href="{{ url_for('index', view='archive', feed=selected) }}">清除</a>{% endif %}
         </form>
+      {% else %}
+        <div class="toolbar stream-actions">
+          <div class="segments" aria-label="阅读状态">
+            <a {% if view == 'all' %}aria-current="page"{% endif %} href="{{ url_for('index', feed=selected) }}">全部</a>
+            <a {% if view == 'unread' %}aria-current="page"{% endif %} href="{{ url_for('index', feed=selected, view='unread') }}">未读</a>
+          </div>
+          {% if current %}
+            <form class="source-actions" method="post" action="{{ url_for('pause', feed_id=current.id) }}">
+              {{ form_token_input() }}
+              <a href="{{ url_for('index', view='archive', feed=current.id) }}">查看归档</a>
+              <button class="quiet">取消订阅</button>
+            </form>
+          {% endif %}
+        </div>
+        {% if current %}<p class="muted sync-status">最近同步 {{ current.updated | localtime or '尚未成功' }}</p>{% endif %}
+      {% endif %}
+    </div>
+    <div class="entries">
+      {% for entry in entries %}
+        <details class="entry{% if entry.unread %} unread{% endif %}" data-feed-id="{{ entry.feed_id }}" data-open-url="{{ url_for('open_article', entry_id=entry.id, inline=1) }}">
+          <summary>
+            <span class="entry-info">
+              <span class="entry-meta"><span>{{ entry.source }}</span><time>{{ (entry.published or entry.added) | localtime }}</time></span>
+              <span class="entry-title">{{ entry.title }}</span>
+              {% if archive %}<span class="muted">首次同步 {{ entry.added | localtime }}</span>{% endif %}
+            </span>
+            <span class="chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="entry-content" aria-live="polite">
+            <noscript><form method="post" action="{{ url_for('open_article', entry_id=entry.id) }}">{{ form_token_input() }}<button>打开正文</button></form></noscript>
+          </div>
+        </details>
+      {% else %}
+        <div class="empty">{{ '没有符合条件的归档文章。' if archive else ('暂无未读文章。' if view == 'unread' else '订阅同步后，文章会出现在这里。') }}</div>
+      {% endfor %}
+    </div>
+    {% if page > 1 or more %}
+      <div class="pager">
+        {% if page > 1 %}<a class="button" href="{{ url_for('index', feed=selected, view=view, day=day or none, page=page-1) }}">上一页</a>{% endif %}
+        {% if more %}<a class="button" href="{{ url_for('index', feed=selected, view=view, day=day or none, page=page+1) }}">下一页</a>{% endif %}
       </div>
     {% endif %}
-    {% for entry in entries %}
-      <div class="entry">
-        <div class="muted">{{ entry.source }} · {{ (entry.published or entry.added) | localtime }}</div>
-        <form method="post" action="{{ url_for('open_article', entry_id=entry.id) }}">
-          {{ form_token_input() }}
-          <button class="entry-title {% if not entry.first_opened %}unread{% endif %}">{{ entry.title }}</button>
-        </form>
-      </div>
-    {% else %}
-      <p class="empty">{{ '这里还没有可显示的文章。订阅源抓取后，刷新页面即可查看。' if feeds else '添加订阅后，文章会出现在这里。' }}</p>
-    {% endfor %}
-    <div class="toolbar pager">
-      {% if page > 1 %}<a href="{{ url_for('index', feed=selected, view='unread' if unread else none, page=page-1) }}">上一页</a>{% endif %}
-      {% if more %}<a href="{{ url_for('index', feed=selected, view='unread' if unread else none, page=page+1) }}">下一页</a>{% endif %}
-    </div>
+    <input id="reader-form-token" type="hidden" value="{{ form_token }}">
   </section>
 </div>
 {% endblock %}

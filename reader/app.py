@@ -1,9 +1,10 @@
 import calendar
 from contextlib import closing
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from email.utils import formatdate
 from hashlib import sha256
 from html.parser import HTMLParser
+from io import BytesIO
 from pathlib import Path
 import re
 from secrets import compare_digest, token_urlsafe
@@ -12,12 +13,16 @@ from threading import Event, Thread
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.request import Request, urlopen
-from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.etree.ElementTree import Element, ParseError, SubElement, tostring
 
 import bleach
 import feedparser
-from flask import Flask, Response, abort, redirect, render_template, request, url_for
+from defusedxml.ElementTree import fromstring as parse_opml
+from defusedxml.common import DefusedXmlException
+from flask import Flask, Response, abort, redirect, render_template, request, send_file, url_for
 from waitress import serve
+
+from exports import article_export
 
 HUB = "http://127.0.0.1:1200"
 PORT = 1210
@@ -25,7 +30,7 @@ DB = Path(__file__).resolve().parents[1] / "runtime" / "reader.sqlite3"
 MAX_FEED_SIZE = 8 * 1024 * 1024
 SOURCE_TYPES = ("博客 / RSS", "X", "微信公众号", "YouTube", "哔哩哔哩", "微博")
 app = Flask(__name__)
-app.config.update(TRUSTED_HOSTS=["127.0.0.1", "localhost"], MAX_CONTENT_LENGTH=16_384)
+app.config.update(TRUSTED_HOSTS=["127.0.0.1", "localhost"], MAX_CONTENT_LENGTH=2 * 1024 * 1024)
 app.jinja_env.globals["form_token"] = token_urlsafe(32)
 wake = Event()
 
@@ -52,10 +57,17 @@ def initialize():
                 item_key TEXT NOT NULL, title TEXT NOT NULL, link TEXT NOT NULL,
                 body TEXT NOT NULL, published INTEGER, added INTEGER DEFAULT (unixepoch()),
                 first_opened INTEGER, last_opened INTEGER, opens INTEGER NOT NULL DEFAULT 0,
+                marked_read INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(feed_id, item_key)
             );
             CREATE INDEX IF NOT EXISTS entries_feed ON entries(feed_id);
+            CREATE INDEX IF NOT EXISTS entries_added ON entries(added);
         """)
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            columns = {column["name"] for column in conn.execute("PRAGMA table_info(entries)")}
+            if "marked_read" not in columns:
+                conn.execute("ALTER TABLE entries ADD COLUMN marked_read INTEGER NOT NULL DEFAULT 0")
 
 
 def web_url(value):
@@ -253,7 +265,10 @@ def protect_local_actions():
 
 @app.after_request
 def browser_headers(response):
-    response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'self'; img-src http: https:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; "
+        "img-src http: https:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    )
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -267,21 +282,40 @@ def localtime(value):
 @app.get("/")
 def index():
     selected = request.args.get("feed", type=int)
-    unread = request.args.get("view") == "unread"
+    view = request.args.get("view", "all")
+    if view not in {"all", "unread", "archive"}:
+        abort(400)
+    archive = view == "archive"
+    day = request.args.get("day", "") if archive else ""
+    start = end = None
+    if day:
+        try:
+            selected_day = date.fromisoformat(day)
+            day = selected_day.isoformat()
+            start = int(datetime.combine(selected_day, time.min).timestamp())
+            end = int(datetime.combine(selected_day + timedelta(days=1), time.min).timestamp())
+        except (OSError, OverflowError, ValueError):
+            abort(400)
     page = max(1, min(request.args.get("page", 1, type=int), 1_000_000))
     with closing(connect()) as conn:
         feeds = conn.execute("""
-            SELECT f.*, count(e.id) FILTER (WHERE e.first_opened IS NULL) AS unread
-            FROM feeds f LEFT JOIN entries e ON f.id=e.feed_id WHERE f.active=1 GROUP BY f.id ORDER BY f.kind, f.title
-        """).fetchall()
+            SELECT f.*, count(e.id) FILTER (WHERE e.first_opened IS NULL AND e.marked_read=0) AS unread,
+                count(e.id) AS total
+            FROM feeds f LEFT JOIN entries e ON f.id=e.feed_id
+            WHERE f.active=1 OR ?=1 GROUP BY f.id ORDER BY f.kind, f.title
+        """, (archive,)).fetchall()
         entries = conn.execute("""
-            SELECT e.id, e.title, e.published, e.added, e.first_opened, f.title AS source, f.kind
+            SELECT e.id, e.feed_id, e.title, e.published, e.added, f.title AS source,
+                (e.first_opened IS NULL AND e.marked_read=0) AS unread
             FROM entries e JOIN feeds f ON f.id=e.feed_id
-            WHERE f.active=1 AND (? IS NULL OR f.id=?) AND (?=0 OR e.first_opened IS NULL)
-            ORDER BY coalesce(e.published, e.added) DESC, e.id DESC LIMIT 41 OFFSET ?
-        """, (selected, selected, unread, (page - 1) * 40)).fetchall()
+            WHERE (f.active=1 OR ?=1) AND (? IS NULL OR f.id=?)
+                AND (?=0 OR (e.first_opened IS NULL AND e.marked_read=0))
+                AND (? IS NULL OR (e.added>=? AND e.added<?))
+            ORDER BY CASE WHEN ?=1 THEN e.added ELSE coalesce(e.published, e.added) END DESC, e.id DESC
+            LIMIT 41 OFFSET ?
+        """, (archive, selected, selected, view == "unread", start, start, end, archive, (page - 1) * 40)).fetchall()
     return render_template("index.html", feeds=feeds, entries=entries[:40], selected=selected, source_types=SOURCE_TYPES,
-                           unread=unread, page=page, more=len(entries) > 40)
+                           view=view, archive=archive, day=day, page=page, more=len(entries) > 40)
 
 
 @app.get("/healthz")
@@ -311,6 +345,97 @@ def combined_feed():
         if entry["published"]:
             SubElement(item, "pubDate").text = formatdate(entry["published"], usegmt=True)
     return Response(tostring(root, encoding="utf-8", xml_declaration=True), mimetype="application/rss+xml")
+
+
+@app.get("/library")
+def library():
+    with closing(connect()) as conn:
+        feeds = conn.execute("""
+            SELECT f.id, f.title, f.active, count(e.id) AS total
+            FROM feeds f LEFT JOIN entries e ON e.feed_id=f.id GROUP BY f.id ORDER BY f.title
+        """).fetchall()
+    return render_template("library.html", feeds=feeds, selected=request.args.get("feed", type=int))
+
+
+@app.get("/library/articles")
+def export_articles():
+    source_id = request.args.get("feed", type=int)
+    file_format = request.args.get("format", "md")
+    mode = request.args.get("mode", "single")
+    if file_format not in {"pdf", "md"} or mode not in {"single", "multiple"}:
+        abort(400)
+    with closing(connect()) as conn:
+        source = conn.execute("SELECT title FROM feeds WHERE id=?", (source_id,)).fetchone() if source_id else None
+        if source_id and not source:
+            abort(404)
+        entries = conn.execute("""
+            SELECT e.*, f.title AS source FROM entries e JOIN feeds f ON f.id=e.feed_id
+            WHERE (? IS NULL OR f.id=?)
+            ORDER BY f.title, coalesce(e.published, e.added) DESC, e.id DESC
+        """, (source_id, source_id)).fetchall()
+    if not entries:
+        return render_template("message.html", title="暂无可导出的文章",
+                               message="所选订阅还没有同步过文章。"), 400
+    title = source["title"] if source else "全部订阅归档"
+    base = f"myrss-feed-{source_id}" if source else "myrss-archive"
+    multiple = mode == "multiple"
+    extension = "zip" if multiple else file_format
+    return send_file(article_export(title, entries, file_format, multiple), as_attachment=True,
+                     download_name=f"{base}.{extension}",
+                     mimetype={"zip": "application/zip", "pdf": "application/pdf", "md": "text/markdown"}[extension])
+
+
+@app.get("/library/subscriptions")
+def export_subscriptions():
+    with closing(connect()) as conn:
+        feeds = conn.execute("SELECT url, title, kind FROM feeds WHERE active=1 ORDER BY kind, title").fetchall()
+    root = Element("opml", version="2.0")
+    SubElement(SubElement(root, "head"), "title").text = "我的 RSS"
+    body = SubElement(root, "body")
+    for feed in feeds:
+        SubElement(body, "outline", type="rss", text=feed["title"], title=feed["title"],
+                   xmlUrl=feed["url"], myrssKind=feed["kind"])
+    content = tostring(root, encoding="utf-8", xml_declaration=True)
+    return send_file(BytesIO(content), as_attachment=True, download_name="myrss-subscriptions.opml",
+                     mimetype="text/x-opml")
+
+
+@app.post("/library/subscriptions")
+def import_subscriptions():
+    upload = request.files.get("opml")
+    if not upload:
+        abort(400)
+    try:
+        root = parse_opml(upload.read())
+        if root.tag != "opml":
+            raise ValueError("Not OPML")
+    except (ParseError, DefusedXmlException, ValueError):
+        return render_template("message.html", title="导入失败", message="请选择有效的 OPML 订阅文件。"), 400
+    valid, skipped = {}, 0
+    for outline in root.iter("outline"):
+        url = outline.get("xmlUrl", "").strip()
+        if not url:
+            continue
+        kind = outline.get("myrssKind", "")
+        if kind not in SOURCE_TYPES:
+            kind = "博客 / RSS"
+        try:
+            normalized = normalize(url, kind)
+        except ValueError:
+            skipped += 1
+            continue
+        title = (outline.get("title") or outline.get("text") or normalized)[:2048]
+        valid.setdefault(normalized, (title, kind))
+    if not valid:
+        return render_template("message.html", title="没有可导入的订阅", message="文件中没有有效的订阅地址。"), 400
+    with closing(connect()) as conn, conn:
+        conn.executemany("""
+            INSERT INTO feeds(url, title, kind) VALUES (?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET active=1, next_check=0 WHERE feeds.active=0
+        """, [(url, title, kind) for url, (title, kind) in valid.items()])
+    wake.set()
+    return render_template("message.html", title="导入完成",
+                           message=f"已合并 {len(valid)} 个订阅地址，跳过 {skipped} 个无效地址。")
 
 
 @app.post("/feeds")
@@ -347,6 +472,22 @@ def pause(feed_id):
     return redirect(url_for("index"), code=303)
 
 
+@app.post("/read-all")
+def mark_all_read():
+    source_id = request.form.get("feed", type=int)
+    view = request.form.get("view", "all")
+    if ("feed" in request.form and source_id is None) or view not in {"all", "unread"}:
+        abort(400)
+    with closing(connect()) as conn, conn:
+        conn.execute("""
+            UPDATE entries SET marked_read=1
+            WHERE marked_read=0 AND first_opened IS NULL AND feed_id IN (
+                SELECT id FROM feeds WHERE active=1 AND (? IS NULL OR id=?)
+            )
+        """, (source_id, source_id))
+    return redirect(url_for("index", feed=source_id, view=view), code=303)
+
+
 @app.post("/articles/<int:entry_id>/open")
 def open_article(entry_id):
     with closing(connect()) as conn, conn:
@@ -356,18 +497,24 @@ def open_article(entry_id):
         """, (entry_id,))
         if not updated.rowcount:
             abort(404)
+    if request.args.get("inline") == "1":
+        return render_template("article_body.html", entry=get_entry(entry_id))
     return redirect(url_for("article", entry_id=entry_id), code=303)
 
 
-@app.get("/articles/<int:entry_id>")
-def article(entry_id):
+def get_entry(entry_id):
     with closing(connect()) as conn:
         entry = conn.execute("""
             SELECT e.*, f.title AS source, f.kind FROM entries e JOIN feeds f ON f.id=e.feed_id WHERE e.id=?
         """, (entry_id,)).fetchone()
     if not entry:
         abort(404)
-    return render_template("article.html", entry=entry)
+    return entry
+
+
+@app.get("/articles/<int:entry_id>")
+def article(entry_id):
+    return render_template("article.html", entry=get_entry(entry_id))
 
 
 @app.get("/stats")
