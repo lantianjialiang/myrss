@@ -9,8 +9,9 @@ from pathlib import Path
 import re
 from secrets import compare_digest, token_urlsafe
 import sqlite3
+from ssl import SSLEOFError
 from threading import Event, Thread
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.request import Request, urlopen
 from xml.etree.ElementTree import Element, ParseError, SubElement, tostring
@@ -25,10 +26,11 @@ from waitress import serve
 from exports import article_export
 
 HUB = "http://127.0.0.1:1200"
+READHUB_DAILY = "/readhub/daily"
 PORT = 1210
 DB = Path(__file__).resolve().parents[1] / "runtime" / "reader.sqlite3"
 MAX_FEED_SIZE = 8 * 1024 * 1024
-SOURCE_TYPES = ("博客 / RSS", "X", "微信公众号", "YouTube", "哔哩哔哩", "微博")
+SOURCE_TYPES = ("博客 / RSS", "X", "微信公众号", "YouTube", "哔哩哔哩", "微博", "小宇宙", "豆瓣", "Readhub")
 app = Flask(__name__)
 app.config.update(TRUSTED_HOSTS=["127.0.0.1", "localhost"], MAX_CONTENT_LENGTH=2 * 1024 * 1024)
 app.jinja_env.globals["form_token"] = token_urlsafe(32)
@@ -58,6 +60,7 @@ def initialize():
                 body TEXT NOT NULL, published INTEGER, added INTEGER DEFAULT (unixepoch()),
                 first_opened INTEGER, last_opened INTEGER, opens INTEGER NOT NULL DEFAULT 0,
                 marked_read INTEGER NOT NULL DEFAULT 0,
+                audio_url TEXT,
                 UNIQUE(feed_id, item_key)
             );
             CREATE INDEX IF NOT EXISTS entries_feed ON entries(feed_id);
@@ -68,6 +71,8 @@ def initialize():
             columns = {column["name"] for column in conn.execute("PRAGMA table_info(entries)")}
             if "marked_read" not in columns:
                 conn.execute("ALTER TABLE entries ADD COLUMN marked_read INTEGER NOT NULL DEFAULT 0")
+            if "audio_url" not in columns:
+                conn.execute("ALTER TABLE entries ADD COLUMN audio_url TEXT")
 
 
 def web_url(value):
@@ -116,6 +121,41 @@ def social_feed_url(value, kind):
     return web_url(candidate)
 
 
+def readhub_url(value):
+    parsed = urlsplit(value)
+    path = parsed.path.rstrip("/")
+    if ((parsed.hostname in {"rsshub.app", "www.rsshub.app"} and path == READHUB_DAILY)
+            or (parsed.hostname in {"readhub.cn", "www.readhub.cn"} and path == "/daily")):
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"{HUB}{READHUB_DAILY}{query}"
+    return ""
+
+
+def publication_feed_url(value, kind):
+    parsed = urlsplit(value)
+    path = unquote(parsed.path).strip("/")
+    if kind == "小宇宙":
+        if re.fullmatch(r"[0-9a-fA-F]{24}", value):
+            return f"{HUB}/xiaoyuzhou/podcast/{value.lower()}"
+        if parsed.hostname in {"xiaoyuzhoufm.com", "www.xiaoyuzhoufm.com"}:
+            match = re.fullmatch(r"(?:podcast|episode)/([0-9a-fA-F]{24})", path)
+            if match:
+                return f"{HUB}/xiaoyuzhou/podcast/{match[1].lower()}"
+            raise ValueError("请填写小宇宙的播客主页、单集分享链接或节目 ID。")
+    elif parsed.hostname in {"douban.com", "www.douban.com", "m.douban.com"}:
+        group = re.fullmatch(r"group/([A-Za-z0-9_-]+)(?:/discussion)?", path)
+        if group:
+            return f"{HUB}/douban/group/{group[1]}"
+        doulist = re.fullmatch(r"doulist/([0-9]+)", path)
+        if doulist:
+            return f"{HUB}/douban/doulist/{doulist[1]}"
+        person = re.fullmatch(r"people/([0-9]+)(?:/status)?", path)
+        if person:
+            return f"{HUB}/douban/people/{person[1]}/status"
+        raise ValueError("请填写豆瓣小组、豆列或带数字 ID 的个人主页，也可粘贴 RSSHub 路由。")
+    return web_url(value)
+
+
 def normalize(value, kind):
     if len(value) > 2048 or any(char.isspace() for char in value):
         raise ValueError("请输入单个有效的链接或账号。")
@@ -123,6 +163,13 @@ def normalize(value, kind):
         return HUB + "/" + value.removeprefix("rsshub://").lstrip("/")
     if value.startswith("/") and not value.startswith("//"):
         return HUB + value
+    if local_readhub := readhub_url(value):
+        return local_readhub
+    if kind in {"小宇宙", "豆瓣"}:
+        url = publication_feed_url(value, kind)
+        if not url:
+            raise ValueError("请填写该平台的节目、小组、个人主页或 RSS 地址。")
+        return url
     if kind in {"YouTube", "哔哩哔哩", "微博"}:
         url = social_feed_url(value, kind)
         if not url:
@@ -169,15 +216,23 @@ class FeedLinks(HTMLParser):
 
 def download(url):
     req = Request(url, headers={"User-Agent": "LocalRSSReader/1.0", "Accept": "application/atom+xml, application/rss+xml, application/xml, text/html;q=0.8, */*;q=0.5"})
-    with urlopen(req, timeout=45 if url.startswith(HUB + "/") else 14) as response:
-        body = response.read(MAX_FEED_SIZE + 1)
-        if len(body) > MAX_FEED_SIZE:
-            raise ValueError("订阅源超过 8 MB。")
-        return response.geturl(), response.headers.get("Content-Type", ""), body
+    for attempt in range(2):
+        try:
+            with urlopen(req, timeout=45 if url.startswith(HUB + "/") else 14) as response:
+                body = response.read(MAX_FEED_SIZE + 1)
+                if len(body) > MAX_FEED_SIZE:
+                    raise ValueError("订阅源超过 8 MB。")
+                return response.geturl(), response.headers.get("Content-Type", ""), body
+        except (SSLEOFError, URLError) as exc:
+            reason = exc.reason if isinstance(exc, URLError) else exc
+            if not isinstance(reason, SSLEOFError):
+                raise
+            if attempt:
+                raise ValueError("订阅源的 HTTPS 连接中断，重试后仍未成功。稍后会自动刷新。") from exc
 
 
 def fetch_feed(url):
-    final_url, content_type, body = download(url)
+    final_url, content_type, body = download(readhub_url(url) or url)
     if "text/html" in content_type.lower():
         links = FeedLinks()
         links.feed(body.decode("utf-8", errors="replace"))
@@ -209,7 +264,9 @@ def entry_values(entry):
     )
     key = entry.get("id") or link or sha256((title + body).encode()).hexdigest()
     date = entry.get("published_parsed") or entry.get("updated_parsed")
-    return key, title, link, body, calendar.timegm(date) if date else None
+    audio_url = next((web_url(item["href"]) for item in entry.get("enclosures", [])
+                      if item.get("type", "").lower().startswith("audio/") and item.get("href")), "")
+    return key, title, link, body, calendar.timegm(date) if date else None, audio_url or None
 
 
 def refresh(source):
@@ -220,14 +277,17 @@ def refresh(source):
         error = f"获取失败（HTTP {exc.code}）。"
         if source["url"].startswith(HUB + "/twitter/"):
             error += "请检查 RSSHub 的 X 凭据和网络。"
+        if source["url"].startswith(HUB + "/douban/people/"):
+            error += "请检查数字用户 ID。需要登录才能看到的广播可能需要配置 DOUBAN_COOKIE。"
     except (OSError, ValueError) as exc:
         error = str(exc)[:250]
     else:
         with closing(connect()) as conn, conn:
             conn.executemany("""
-                INSERT INTO entries (feed_id, item_key, title, link, body, published) VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO entries (feed_id, item_key, title, link, body, published, audio_url) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(feed_id, item_key) DO UPDATE SET title=excluded.title, link=excluded.link,
-                    body=excluded.body, published=coalesce(excluded.published, entries.published)
+                    body=excluded.body, published=coalesce(excluded.published, entries.published),
+                    audio_url=coalesce(excluded.audio_url, entries.audio_url)
             """, [(source["id"], *item) for item in items])
             conn.execute("""UPDATE feeds SET title=?, updated=unixepoch(), error=NULL,
                             next_check=unixepoch()+1800 WHERE id=?""",
@@ -267,7 +327,7 @@ def protect_local_actions():
 def browser_headers(response):
     response.headers["Content-Security-Policy"] = (
         "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; "
-        "img-src http: https:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+        "img-src http: https:; media-src http: https:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
     )
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cache-Control"] = "no-store"
@@ -447,6 +507,8 @@ def add_feed():
         url = normalize(request.form.get("url", "").strip(), kind)
     except ValueError as exc:
         return render_template("message.html", title="添加订阅失败", message=str(exc)), 400
+    if kind == "博客 / RSS" and urlsplit(url)._replace(query="", fragment="").geturl() == HUB + READHUB_DAILY:
+        kind = "Readhub"
     with closing(connect()) as conn, conn:
         row = conn.execute("""
             INSERT INTO feeds(url, title, kind) VALUES (?, ?, ?)

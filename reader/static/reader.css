@@ -76,6 +76,7 @@ button:disabled { color: var(--muted); background: var(--canvas); cursor: defaul
 .entry[open] .chevron { transform: rotate(225deg); margin-top: 4px; }
 .entry-content { margin: 0 1.45rem 1.1rem 2rem; padding: .9rem 0 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
 .original-link { font-size: .86rem; font-weight: 650; }
+.entry-audio { display: block; width: min(100%, 460px); margin-top: .8rem; }
 .article-body { max-width: 76ch; margin-top: .8rem; font-size: 1rem; line-height: 1.8; }
 .article-body img { max-width: 100%; height: auto; }
 .article-body pre { overflow: auto; padding: .9rem; background: var(--canvas); border: 1px solid var(--line); border-radius: 8px; }

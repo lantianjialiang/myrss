@@ -46,6 +46,9 @@
 | YouTube | `@账号`、频道主页或频道 ID，例如 `https://www.youtube.com/@zhengquejun` |
 | 哔哩哔哩 | UP 主空间链接或数字 UID，订阅投稿视频 |
 | 微博 | 带数字 UID 的博主主页链接或数字 UID |
+| 小宇宙 | 播客主页、单集分享链接或节目 ID。展开单集可播放源提供的音频 |
+| 豆瓣 | 小组、豆列或带数字 ID 的用户广播主页；也可以填写 RSSHub 路由，如 `/douban/book/latest/fiction` |
+| Readhub | `https://readhub.cn/daily` 或 `/readhub/daily`，通过本机 RSSHub 获取 |
 
 ## 归档与迁移
 

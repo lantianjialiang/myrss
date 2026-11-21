@@ -17,6 +17,7 @@
         </form>
         <p class="muted">公众号可填 RSS 地址、Wechat2RSS 订阅 ID 或公众号栏目链接。</p>
         <p class="muted">YouTube 可填 @账号。哔哩哔哩和微博可填数字 UID 或带 UID 的主页链接。</p>
+        <p class="muted">小宇宙填节目或单集链接。豆瓣填小组、豆列或带数字 ID 的主页。Readhub 可填早报页面链接。</p>
       </details>
     {% endif %}
     <a class="source {% if selected is none %}selected{% endif %}" href="{{ url_for('index', view=view, day=day or none) }}">
