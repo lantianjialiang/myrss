@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% macro form_token_input() -%}
+  <input type="hidden" name="form_token" value="{{ form_token }}">
+{%- endmacro %}
+{% block main %}
+<div class="layout">
+  <aside>
+    <h2>订阅源</h2>
+    <details {% if not feeds %}open{% endif %}>
+      <summary>添加订阅</summary>
+      <form method="post" action="{{ url_for('add_feed') }}" class="add">
+        {{ form_token_input() }}
+        <label>类型<select name="kind">{% for kind in source_types %}<option>{{ kind }}</option>{% endfor %}</select></label>
+        <label>地址或账号<input name="url" maxlength="2048" required placeholder="RSS、博客地址或 @账号"></label>
+        <button>添加</button>
+      </form>
+      <p class="muted">公众号可填 RSS 地址、Wechat2RSS 订阅 ID 或公众号栏目链接。</p>
+      <p class="muted">YouTube 可填 @账号或频道主页。哔哩哔哩和微博可填数字 UID 或带 UID 的主页链接。</p>
+    </details>
+    <a class="source {% if selected is none %}selected{% endif %}" href="{{ url_for('index', view='unread' if unread else none) }}">全部订阅 <span>{{ feeds | sum(attribute='unread') }}</span></a>
+    {% for group in feeds | groupby('kind') %}
+      <h3>{{ group.grouper }}</h3>
+      {% for source in group.list %}
+        <a class="source {% if selected == source.id %}selected{% endif %}" href="{{ url_for('index', feed=source.id, view='unread' if unread else none) }}">{{ source.title }} <span>{{ source.unread }}</span></a>
+        {% if source.error %}<p class="error">{{ source.error }}</p>{% endif %}
+        {% if not source.updated and not source.error %}<p class="muted">等待首次刷新</p>{% endif %}
+      {% endfor %}
+    {% endfor %}
+  </aside>
+  <section>
+    {% set current = feeds | selectattr('id', 'equalto', selected) | first | default(none) %}
+    <div class="toolbar">
+      <h1>{{ current.title if current else ('未读文章' if unread else '全部文章') }}</h1>
+      <form method="post" action="{{ url_for('refresh_now') }}">
+        {{ form_token_input() }}
+        {% if current %}<input type="hidden" name="feed" value="{{ current.id }}">{% endif %}
+        <button>刷新{{ '此源' if current else '全部' }}</button>
+      </form>
+    </div>
+    {% if current %}
+      <div class="toolbar muted">
+        <span>最近同步：{{ current.updated | localtime or '尚未成功同步' }}</span>
+        <form method="post" action="{{ url_for('pause', feed_id=current.id) }}">
+          {{ form_token_input() }}
+          <button class="quiet">取消订阅</button>
+        </form>
+      </div>
+    {% endif %}
+    {% for entry in entries %}
+      <div class="entry">
+        <div class="muted">{{ entry.source }} · {{ (entry.published or entry.added) | localtime }}</div>
+        <form method="post" action="{{ url_for('open_article', entry_id=entry.id) }}">
+          {{ form_token_input() }}
+          <button class="entry-title {% if not entry.first_opened %}unread{% endif %}">{{ entry.title }}</button>
+        </form>
+      </div>
+    {% else %}
+      <p class="empty">{{ '这里还没有可显示的文章。订阅源抓取后，刷新页面即可查看。' if feeds else '添加订阅后，文章会出现在这里。' }}</p>
+    {% endfor %}
+    <div class="toolbar pager">
+      {% if page > 1 %}<a href="{{ url_for('index', feed=selected, view='unread' if unread else none, page=page-1) }}">上一页</a>{% endif %}
+      {% if more %}<a href="{{ url_for('index', feed=selected, view='unread' if unread else none, page=page+1) }}">下一页</a>{% endif %}
+    </div>
+  </section>
+</div>
+{% endblock %}

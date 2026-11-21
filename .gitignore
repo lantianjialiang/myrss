@@ -1,0 +1,11 @@
+*.pdf
+tmp/
+outputs/
+node_modules/
+.venv-kokoro/
+models/
+__pycache__/
+/node24/
+/runtime/
+.env
+.env.*

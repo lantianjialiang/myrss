@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ entry.title }} · 我的 RSS{% endblock %}
+{% block main %}
+<article>
+  <a href="{{ url_for('index', feed=entry.feed_id) }}">返回订阅</a>
+  <p class="muted">{{ entry.source }} · {{ (entry.published or entry.added) | localtime }}</p>
+  <h1>{{ entry.title }}</h1>
+  {% if entry.link %}<a href="{{ entry.link }}" target="_blank" rel="noopener noreferrer">在新标签页打开原文 ↗</a>{% endif %}
+  {% if entry.body %}<div class="article-body">{{ entry.body | safe }}</div>{% else %}<p>这篇文章没有提供订阅正文。</p>{% endif %}
+</article>
+{% endblock %}

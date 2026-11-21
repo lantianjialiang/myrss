@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}我的 RSS{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
+</head>
+<body>
+  <header><nav><a class="brand" href="{{ url_for('index') }}">我的 RSS</a>
+    <a href="{{ url_for('index', view='unread') }}">未读</a>
+    <a href="{{ url_for('stats') }}">阅读统计</a>
+    <a href="{{ url_for('combined_feed') }}">RSS</a>
+  </nav></header>
+  <main>{% block main %}{% endblock %}</main>
+</body>
+</html>
