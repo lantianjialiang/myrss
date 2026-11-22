@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}搜索 · 我的 RSS{% endblock %}
+{% block main %}
+<div class="management">
+  <h1>搜索文章</h1>
+  <p class="muted">在已抓取文章的标题与正文中搜索。支持空格分隔的多个关键词。</p>
+  <form class="search-form" method="get" action="{{ url_for('search') }}">
+    <input name="q" value="{{ query }}" maxlength="200" placeholder="关键词" aria-label="搜索关键词" required>
+    <button class="primary">搜索</button>
+  </form>
+  {% if query %}
+    {% if results %}
+      <p class="muted">找到 {{ results | length }} 条结果（最多显示 100 条）。</p>
+      <div class="entries">
+      {% for item in results %}
+        <div class="search-result">
+          <p class="entry-meta"><span>{{ item.source }}</span><time>{{ (item.published or item.added) | localtime }}</time></p>
+          <a class="entry-title" href="{{ url_for('article', entry_id=item.id) }}">{{ item.title }}</a>
+          <p class="muted">{{ item.excerpt | striptags }}</p>
+        </div>
+      {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted">没有找到匹配的文章。</p>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}设置 · 我的 RSS{% endblock %}
+{% block main %}
+<div class="management">
+  <form method="post" action="{{ url_for('save_settings_page') }}" class="settings-form">
+    <input type="hidden" name="form_token" value="{{ form_token }}">
+    <div class="settings-head">
+      <h1>设置</h1>
+      <button class="primary">保存设置</button>
+    </div>
+    {% if message %}<p class="notice">{{ message }}</p>{% endif %}
+    <div class="management-grid">
+      <section class="panel">
+        <h2>阅读行为</h2>
+        <div class="stack">
+          <label>自动刷新间隔（分钟）
+            <input type="number" name="refresh_minutes" min="1" max="1440" value="{{ settings.refresh_minutes }}" required>
+          </label>
+          <label>失败重试间隔（分钟）
+            <input type="number" name="retry_minutes" min="1" max="1440" value="{{ settings.retry_minutes }}" required>
+          </label>
+          <label>每页文章数
+            <input type="number" name="page_size" min="10" max="200" value="{{ settings.page_size }}" required>
+          </label>
+          <label>聚合 RSS 条数
+            <input type="number" name="feed_limit" min="10" max="1000" value="{{ settings.feed_limit }}" required>
+          </label>
+          <label>默认视图
+            <select name="default_view">
+              <option value="all" {% if settings.default_view == 'all' %}selected{% endif %}>全部文章</option>
+              <option value="unread" {% if settings.default_view == 'unread' %}selected{% endif %}>未读文章</option>
+            </select>
+          </label>
+          <label>文章排序
+            <select name="sort_by">
+              <option value="published" {% if settings.sort_by == 'published' %}selected{% endif %}>按发布时间</option>
+              <option value="added" {% if settings.sort_by == 'added' %}selected{% endif %}>按入库时间</option>
+            </select>
+          </label>
+          <label>阅读统计时间窗口（天）
+            <input type="number" name="stats_days" min="1" max="3650" value="{{ settings.stats_days }}" required>
+          </label>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>界面</h2>
+        <div class="stack">
+          <label class="check"><input type="checkbox" name="show_unread" value="1" {% if settings.show_unread == '1' %}checked{% endif %}> 显示未读数量</label>
+          {# 复选框未勾选时浏览器不会提交该字段，补一个隐藏字段让后端收到明确的 0 #}
+          <input type="hidden" name="show_unread" value="0">
+          <p class="muted">关闭后，侧边栏的未读数字会隐藏，但「未读」筛选仍可正常使用。</p>
+          <label>主题
+            <select name="theme">
+              <option value="light" {% if settings.theme == 'light' %}selected{% endif %}>浅色</option>
+              <option value="dark" {% if settings.theme == 'dark' %}selected{% endif %}>深色</option>
+            </select>
+          </label>
+          <p class="muted">快捷键：j / k 展开上一篇 / 下一篇，m 标记已读并收起。</p>
+        </div>
+      </section>
+    </div>
+  </form>
+
+  <div class="management-grid settings-extra" id="import-export">
+    <section class="panel">
+      <h2>导出历史文章</h2>
+      <p class="muted">包含已归档的文章，也可选择已经取消的订阅。</p>
+      <form class="stack" method="get" action="{{ url_for('export_articles') }}">
+        <label>订阅范围<select name="feed">
+          <option value="">全部订阅</option>
+          {% for feed in feeds %}
+            <option value="{{ feed.id }}" {% if feed.id == selected %}selected{% endif %}>{{ feed.title }}（{{ feed.total }} 篇{% if not feed.active %}，已取消{% endif %}）</option>
+          {% endfor %}
+        </select></label>
+        <label>文件格式<select name="format"><option value="md">Markdown</option><option value="pdf">PDF</option></select></label>
+        <label>文件数量<select name="mode"><option value="single">合并成单个文件</option><option value="multiple">每篇一份，打包为 ZIP</option></select></label>
+        <button class="primary">下载文章</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>迁移订阅列表</h2>
+      <p class="muted">OPML 包含订阅名称和地址。导入会合并重复地址。</p>
+      <a class="button" href="{{ url_for('export_subscriptions') }}">导出 OPML</a>
+      <form class="stack import-form" method="post" enctype="multipart/form-data" action="{{ url_for('import_subscriptions') }}">
+        <input type="hidden" name="form_token" value="{{ form_token }}">
+        <label>选择 OPML 文件<input name="opml" type="file" accept=".opml,.xml,text/xml,application/xml" required></label>
+        <button class="primary">导入订阅</button>
+      </form>
+    </section>
+  </div>
+
+  <div class="management-grid settings-extra">
+    <section class="panel">
+      <h2>数据维护</h2>
+      <p class="muted">备份包含订阅、文章与阅读记录。恢复会覆盖当前数据库，请先停止服务并备份现有数据。</p>
+      <div class="stack">
+        <a class="button" href="{{ url_for('backup_database') }}">下载数据库备份</a>
+        <form method="post" enctype="multipart/form-data" action="{{ url_for('restore_database') }}" class="stack">
+          <input type="hidden" name="form_token" value="{{ form_token }}">
+          <label>选择备份文件<input name="database" type="file" accept=".sqlite3,.db,.sqlite,application/vnd.sqlite3" required></label>
+          <label class="check"><input type="checkbox" name="confirm" value="1" required> 我已备份现有数据，确认覆盖</label>
+          <button>恢复数据库</button>
+        </form>
+        <a class="button" href="{{ url_for('manage_feeds') }}">批量管理订阅源</a>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>RSSHub 配置</h2>
+      <p class="muted">下列设置来自 <code>{{ hub_env_path }}</code>，为只读展示。修改后需重启 RSSHub 服务生效。</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th scope="col">配置项</th><th scope="col">当前值</th></tr></thead>
+        <tbody>
+        {% for key, value in hub_env.items() %}
+          <tr><th scope="row">{{ key }}</th><td>{{ '（已设置）' if value else '（空）' }}</td></tr>
+        {% else %}
+          <tr><td colspan="2">未找到 RSSHub 配置文件或没有可展示的设置。</td></tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      <p class="muted">敏感凭据（Token、Cookie）刻意不显示明文。</p>
+    </section>
+  </div>
+</div>
+{% endblock %}

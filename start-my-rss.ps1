@@ -1,6 +1,17 @@
 param([switch]$NoBrowser)
 
 $ErrorActionPreference = 'Stop'
+
+# PowerShell 5.1 Start-Process fails when proxy variables differ only by case.
+foreach ($name in @('HTTP_PROXY', 'HTTPS_PROXY')) {
+    $lower = $name.ToLowerInvariant()
+    $upperValue = [Environment]::GetEnvironmentVariable($name)
+    $lowerValue = [Environment]::GetEnvironmentVariable($lower)
+    if ($upperValue -and $lowerValue) {
+        [Environment]::SetEnvironmentVariable($lower, $null)
+    }
+}
+
 $runtime = Join-Path $PSScriptRoot 'runtime'
 $null = New-Item -Path $runtime -ItemType Directory -Force
 

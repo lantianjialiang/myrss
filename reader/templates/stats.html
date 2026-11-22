@@ -3,9 +3,9 @@
 {% block main %}
 <section class="stats">
   <h1>阅读统计</h1>
-  <p>近 30 天打开过 {{ total }} 篇文章，按来源排名。重复打开同一篇文章会增加打开次数。</p>
+  <p>近 {{ days }} 天打开过 {{ total }} 篇文章，按来源排名。重复打开同一篇文章会增加打开次数。</p>
   <div class="table-wrap"><table>
-    <thead><tr><th scope="col">来源</th><th scope="col">类型</th><th scope="col">近 30 天篇数</th><th scope="col">累计篇数</th><th scope="col">累计打开次数</th></tr></thead>
+    <thead><tr><th scope="col">来源</th><th scope="col">类型</th><th scope="col">近 {{ days }} 天篇数</th><th scope="col">累计篇数</th><th scope="col">累计打开次数</th></tr></thead>
     <tbody>
     {% for source in sources %}
       <tr><th scope="row">{{ source.title }}{% if not source.active %} <small>已取消</small>{% endif %}</th>

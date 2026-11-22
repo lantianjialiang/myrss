@@ -20,7 +20,7 @@ import bleach
 import feedparser
 from defusedxml.ElementTree import fromstring as parse_opml
 from defusedxml.common import DefusedXmlException
-from flask import Flask, Response, abort, redirect, render_template, request, send_file, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, url_for
 from waitress import serve
 
 from exports import article_export
@@ -31,6 +31,32 @@ PORT = 1210
 DB = Path(__file__).resolve().parents[1] / "runtime" / "reader.sqlite3"
 MAX_FEED_SIZE = 8 * 1024 * 1024
 SOURCE_TYPES = ("博客 / RSS", "X", "微信公众号", "YouTube", "哔哩哔哩", "微博", "小宇宙", "豆瓣", "Readhub")
+HUB_ENV = Path(__file__).resolve().parents[1] / "RSSHub" / ".env"
+
+# 设置项：名称 -> (默认值, 校验函数)。校验失败时回退到默认值。
+def positive(value, low, high):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if low <= number <= high else None
+
+
+def choice(*options):
+    return lambda value: value if value in options else None
+
+
+SETTINGS = {
+    "refresh_minutes": (30, lambda v: positive(v, 1, 1440)),
+    "retry_minutes": (15, lambda v: positive(v, 1, 1440)),
+    "page_size": (40, lambda v: positive(v, 10, 200)),
+    "feed_limit": (100, lambda v: positive(v, 10, 1000)),
+    "default_view": ("all", choice("all", "unread")),
+    "stats_days": (30, lambda v: positive(v, 1, 3650)),
+    "show_unread": ("1", choice("0", "1")),
+    "theme": ("light", choice("light", "dark")),
+    "sort_by": ("published", choice("published", "added")),
+}
 app = Flask(__name__)
 app.config.update(TRUSTED_HOSTS=["127.0.0.1", "localhost"], MAX_CONTENT_LENGTH=2 * 1024 * 1024)
 app.jinja_env.globals["form_token"] = token_urlsafe(32)
@@ -65,6 +91,12 @@ def initialize():
             );
             CREATE INDEX IF NOT EXISTS entries_feed ON entries(feed_id);
             CREATE INDEX IF NOT EXISTS entries_added ON entries(added);
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+                title, body, source, tokenize='unicode61 remove_diacritics 2'
+            );
         """)
         with conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -73,6 +105,62 @@ def initialize():
                 conn.execute("ALTER TABLE entries ADD COLUMN marked_read INTEGER NOT NULL DEFAULT 0")
             if "audio_url" not in columns:
                 conn.execute("ALTER TABLE entries ADD COLUMN audio_url TEXT")
+            fts_sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='entries_fts'").fetchone()
+            if fts_sql and "content=''" in (fts_sql[0] or ""):
+                conn.execute("DROP TABLE entries_fts")
+                conn.execute("CREATE VIRTUAL TABLE entries_fts USING fts5("
+                             "title, body, source, tokenize='unicode61 remove_diacritics 2')")
+            conn.execute("DELETE FROM entries_fts")
+            conn.execute("""INSERT INTO entries_fts(rowid, title, body, source)
+                            SELECT e.id, e.title, e.body, f.title FROM entries e
+                            JOIN feeds f ON e.feed_id=f.id""")
+
+
+def get_settings():
+    values = {key: default for key, (default, _) in SETTINGS.items()}
+    try:
+        with closing(connect()) as conn:
+            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    except sqlite3.Error:
+        return values
+    for row in rows:
+        rule = SETTINGS.get(row["key"])
+        if rule and (validated := rule[1](row["value"])) is not None:
+            values[row["key"]] = validated
+    return values
+
+
+def save_settings(form):
+    updates = {}
+    for key, (default, validate) in SETTINGS.items():
+        value = validate(form.get(key))
+        if value is None:
+            value = default
+        updates[key] = str(value)
+    with closing(connect()) as conn, conn:
+        conn.executemany("INSERT INTO settings(key, value) VALUES (?, ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", updates.items())
+    return get_settings()
+
+
+def setting_int(settings, key):
+    return int(settings[key])
+
+
+def hub_env_values():
+    values = {}
+    if not HUB_ENV.is_file():
+        return values
+    for line in HUB_ENV.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in {"TWITTER_AUTH_TOKEN", "WEIBO_COOKIES", "DOUBAN_COOKIE", "PROXY_URI", "PROXY_URL_REGEX",
+                   "CHROMIUM_EXECUTABLE_PATH", "REQUEST_TIMEOUT", "REQUEST_RETRY", "CACHE_TYPE", "CACHE_EXPIRE"}:
+            values[key] = value.strip()
+    return values
 
 
 def web_url(value):
@@ -270,6 +358,7 @@ def entry_values(entry):
 
 
 def refresh(source):
+    settings = get_settings()
     try:
         feed = fetch_feed(source["url"])
         items = [entry_values(entry) for entry in feed.entries]
@@ -290,16 +379,24 @@ def refresh(source):
                     audio_url=coalesce(excluded.audio_url, entries.audio_url)
             """, [(source["id"], *item) for item in items])
             conn.execute("""UPDATE feeds SET title=?, updated=unixepoch(), error=NULL,
-                            next_check=unixepoch()+1800 WHERE id=?""",
-                         (feed.feed.get("title") or source["title"], source["id"]))
+                            next_check=unixepoch()+? WHERE id=?""",
+                         (feed.feed.get("title") or source["title"],
+                          setting_int(settings, "refresh_minutes") * 60, source["id"]))
+            conn.execute("DELETE FROM entries_fts WHERE rowid IN (SELECT id FROM entries WHERE feed_id=?)",
+                         (source["id"],))
+            conn.execute("""INSERT INTO entries_fts(rowid, title, body, source)
+                            SELECT e.id, e.title, e.body, f.title FROM entries e
+                            JOIN feeds f ON e.feed_id=f.id WHERE e.feed_id=?""", (source["id"],))
         return
     with closing(connect()) as conn, conn:
-        conn.execute("UPDATE feeds SET error=?, next_check=unixepoch()+900 WHERE id=?", (error, source["id"]))
+        conn.execute("UPDATE feeds SET error=?, next_check=unixepoch()+? WHERE id=?",
+                     (error, setting_int(settings, "retry_minutes") * 60, source["id"]))
 
 
 def refresh_loop():
     while True:
         wake.clear()
+        settings = get_settings()
         with closing(connect()) as conn:
             sources = conn.execute("SELECT * FROM feeds WHERE active=1 AND next_check<=unixepoch() ORDER BY next_check, id").fetchall()
         for source in sources:
@@ -308,8 +405,9 @@ def refresh_loop():
             except Exception:
                 app.logger.exception("Could not refresh source %s", source["id"])
                 with closing(connect()) as conn, conn:
-                    conn.execute("UPDATE feeds SET error=?, next_check=unixepoch()+900 WHERE id=?",
-                                 ("解析失败，详见阅读器日志。", source["id"]))
+                    conn.execute("UPDATE feeds SET error=?, next_check=unixepoch()+? WHERE id=?",
+                                 ("解析失败，详见阅读器日志。",
+                                  setting_int(settings, "retry_minutes") * 60, source["id"]))
         wake.wait(20)
 
 
@@ -339,10 +437,16 @@ def localtime(value):
     return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M") if value else ""
 
 
+@app.context_processor
+def inject_settings():
+    return {"settings": get_settings()}
+
+
 @app.get("/")
 def index():
+    settings = get_settings()
     selected = request.args.get("feed", type=int)
-    view = request.args.get("view", "all")
+    view = request.args.get("view", settings["default_view"])
     if view not in {"all", "unread", "archive"}:
         abort(400)
     archive = view == "archive"
@@ -357,6 +461,8 @@ def index():
         except (OSError, OverflowError, ValueError):
             abort(400)
     page = max(1, min(request.args.get("page", 1, type=int), 1_000_000))
+    size = setting_int(settings, "page_size")
+    order = "e.added" if settings["sort_by"] == "added" else "coalesce(e.published, e.added)"
     with closing(connect()) as conn:
         feeds = conn.execute("""
             SELECT f.*, count(e.id) FILTER (WHERE e.first_opened IS NULL AND e.marked_read=0) AS unread,
@@ -364,18 +470,125 @@ def index():
             FROM feeds f LEFT JOIN entries e ON f.id=e.feed_id
             WHERE f.active=1 OR ?=1 GROUP BY f.id ORDER BY f.kind, f.title
         """, (archive,)).fetchall()
-        entries = conn.execute("""
+        rows = conn.execute("""
             SELECT e.id, e.feed_id, e.title, e.published, e.added, f.title AS source,
                 (e.first_opened IS NULL AND e.marked_read=0) AS unread
             FROM entries e JOIN feeds f ON f.id=e.feed_id
             WHERE (f.active=1 OR ?=1) AND (? IS NULL OR f.id=?)
                 AND (?=0 OR (e.first_opened IS NULL AND e.marked_read=0))
                 AND (? IS NULL OR (e.added>=? AND e.added<?))
-            ORDER BY CASE WHEN ?=1 THEN e.added ELSE coalesce(e.published, e.added) END DESC, e.id DESC
-            LIMIT 41 OFFSET ?
-        """, (archive, selected, selected, view == "unread", start, start, end, archive, (page - 1) * 40)).fetchall()
-    return render_template("index.html", feeds=feeds, entries=entries[:40], selected=selected, source_types=SOURCE_TYPES,
-                           view=view, archive=archive, day=day, page=page, more=len(entries) > 40)
+            ORDER BY CASE WHEN ?=1 THEN e.added ELSE %s END DESC, e.id DESC
+            LIMIT ? OFFSET ?
+        """ % order, (archive, selected, selected, view == "unread", start, start, end, archive,
+                      size + 1, (page - 1) * size)).fetchall()
+    more = len(rows) > size
+    entries = rows[:size]
+    return render_template("index.html", feeds=feeds, entries=entries, selected=selected, source_types=SOURCE_TYPES,
+                           view=view, archive=archive, day=day, page=page, more=more, settings=settings)
+
+
+@app.get("/backup")
+def backup_database():
+    if not DB.is_file():
+        return render_template("message.html", title="暂无数据库", message="还没有可备份的数据。"), 404
+    return send_file(DB, as_attachment=True, download_name="reader.sqlite3",
+                     mimetype="application/vnd.sqlite3")
+
+
+@app.post("/restore")
+def restore_database():
+    upload = request.files.get("database")
+    if not upload or request.form.get("confirm") != "1":
+        abort(400)
+    payload = upload.read()
+    if len(payload) > 200 * 1024 * 1024:
+        return render_template("message.html", title="恢复失败", message="数据库文件超过 200 MB。"), 400
+    temp = DB.with_suffix(".restore")
+    try:
+        temp.write_bytes(payload)
+        with sqlite3.connect(temp) as check:
+            names = {row[0] for row in check.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"feeds", "entries"} <= names:
+            raise ValueError("文件不是有效的 MyRSS 数据库。")
+        for suffix in ("-wal", "-shm"):
+            side = DB.with_name(DB.name + suffix)
+            if side.exists():
+                side.unlink()
+        temp.replace(DB)
+    except (OSError, sqlite3.Error, ValueError) as error:
+        temp.unlink(missing_ok=True)
+        return render_template("message.html", title="恢复失败", message=str(error)), 400
+    initialize()
+    return render_template("message.html", title="恢复完成",
+                           message="数据库已恢复。请重新启动 MyRSS 服务，避免旧连接继续写入。")
+
+
+@app.post("/feeds/batch")
+def batch_feeds():
+    action = request.form.get("action")
+    ids = [value for value in request.form.getlist("feed_ids") if value.isdecimal()]
+    if action not in {"pause", "resume", "delete"} or not ids:
+        abort(400)
+    placeholders = ",".join("?" for _ in ids)
+    with closing(connect()) as conn, conn:
+        if action == "delete":
+            conn.execute(f"DELETE FROM entries_fts WHERE rowid IN (SELECT id FROM entries WHERE feed_id IN ({placeholders}))", ids)
+            conn.execute(f"DELETE FROM entries WHERE feed_id IN ({placeholders})", ids)
+            conn.execute(f"DELETE FROM feeds WHERE id IN ({placeholders})", ids)
+        else:
+            conn.execute(f"UPDATE feeds SET active=?, next_check=0 WHERE id IN ({placeholders})",
+                         [1 if action == "resume" else 0, *ids])
+    if action != "delete":
+        wake.set()
+    labels = {"pause": "已暂停", "resume": "已恢复", "delete": "已删除"}
+    return redirect(url_for("manage_feeds", message=f"{labels[action]} {len(ids)} 个订阅。"), code=303)
+
+
+@app.get("/manage")
+def manage_feeds():
+    with closing(connect()) as conn:
+        feeds = conn.execute("""
+            SELECT f.*, count(e.id) AS total FROM feeds f LEFT JOIN entries e ON f.id=e.feed_id
+            GROUP BY f.id ORDER BY f.active DESC, f.kind, f.title
+        """).fetchall()
+    return render_template("manage.html", feeds=feeds, message=request.args.get("message", ""))
+
+
+@app.get("/search")
+def search():
+    settings = get_settings()
+    query = request.args.get("q", "").strip()
+    results = []
+    if query:
+        with closing(connect()) as conn:
+            results = conn.execute("""
+                SELECT e.id, e.feed_id, e.title, e.published, e.added, f.title AS source,
+                    snippet(entries_fts, 2, '<mark>', '</mark>', '…', 12) AS excerpt
+                FROM entries_fts JOIN entries e ON entries_fts.rowid=e.id
+                JOIN feeds f ON e.feed_id=f.id
+                WHERE entries_fts MATCH ? ORDER BY rank LIMIT 100
+            """, (query,)).fetchall()
+    return render_template("search.html", query=query, results=results, settings=settings)
+
+
+@app.get("/settings")
+def settings_page():
+    settings = get_settings()
+    with closing(connect()) as conn:
+        feeds = conn.execute("""
+            SELECT f.id, f.title, f.active, count(e.id) AS total
+            FROM feeds f LEFT JOIN entries e ON e.feed_id=f.id GROUP BY f.id ORDER BY f.title
+        """).fetchall()
+    return render_template("settings.html", settings=settings, hub_env=hub_env_values(),
+                           hub_env_path=str(HUB_ENV), message=request.args.get("message", ""),
+                           feeds=feeds, selected=request.args.get("feed", type=int))
+
+
+@app.post("/settings")
+def save_settings_page():
+    settings = save_settings(request.form)
+    return redirect(url_for("settings_page", message="设置已保存。"), code=303)
 
 
 @app.get("/healthz")
@@ -385,16 +598,17 @@ def health():
 
 @app.get("/feed.xml")
 def combined_feed():
+    settings = get_settings()
     with closing(connect()) as conn:
         entries = conn.execute("""
             SELECT e.*, f.title AS source FROM entries e JOIN feeds f ON f.id=e.feed_id
-            WHERE f.active=1 ORDER BY coalesce(e.published, e.added) DESC, e.id DESC LIMIT 100
-        """).fetchall()
+            WHERE f.active=1 ORDER BY coalesce(e.published, e.added) DESC, e.id DESC LIMIT ?
+        """, (setting_int(settings, "feed_limit"),)).fetchall()
     root = Element("rss", version="2.0")
     channel = SubElement(root, "channel")
     SubElement(channel, "title").text = "我的 RSS"
     SubElement(channel, "link").text = url_for("index", _external=True)
-    SubElement(channel, "description").text = "本机订阅源的最近 100 篇文章"
+    SubElement(channel, "description").text = f"本机订阅源的最近 {settings['feed_limit']} 篇文章"
     for entry in entries:
         item = SubElement(channel, "item")
         SubElement(item, "title").text = entry["title"]
@@ -409,12 +623,11 @@ def combined_feed():
 
 @app.get("/library")
 def library():
-    with closing(connect()) as conn:
-        feeds = conn.execute("""
-            SELECT f.id, f.title, f.active, count(e.id) AS total
-            FROM feeds f LEFT JOIN entries e ON e.feed_id=f.id GROUP BY f.id ORDER BY f.title
-        """).fetchall()
-    return render_template("library.html", feeds=feeds, selected=request.args.get("feed", type=int))
+    # 「导入与导出」已整合到设置页，旧地址重定向过去，保证已有链接和书签仍可用。
+    target = url_for("settings_page")
+    if request.query_string:
+        target += "?" + request.query_string.decode("utf-8", "replace")
+    return redirect(target + "#import-export")
 
 
 @app.get("/library/articles")
@@ -509,13 +722,39 @@ def add_feed():
         return render_template("message.html", title="添加订阅失败", message=str(exc)), 400
     if kind == "博客 / RSS" and urlsplit(url)._replace(query="", fragment="").geturl() == HUB + READHUB_DAILY:
         kind = "Readhub"
+    # 首次同步前先给一个可读的临时标题，避免侧边栏显示一长串 RSSHub 地址。
+    if kind == "X":
+        handle = url.rstrip("/").rsplit("/", 1)[-1]
+        title = f"@{handle}" if handle else url
+    else:
+        title = urlsplit(url).hostname or url
     with closing(connect()) as conn, conn:
         row = conn.execute("""
-            INSERT INTO feeds(url, title, kind) VALUES (?, ?, ?)
-            ON CONFLICT(url) DO UPDATE SET active=1, next_check=0, kind=excluded.kind RETURNING id
-        """, (url, url, kind)).fetchone()
-    wake.set()
+            INSERT INTO feeds(url, title, kind, next_check) VALUES (?, ?, ?, unixepoch()+120)
+            ON CONFLICT(url) DO UPDATE SET active=1, next_check=unixepoch()+120,
+                title=excluded.title, kind=excluded.kind RETURNING id
+        """, (url, title, kind)).fetchone()
+        source = conn.execute("SELECT * FROM feeds WHERE id=?", (row["id"],)).fetchone()
+
+    def first_fetch():
+        try:
+            refresh(source)
+        except Exception:
+            app.logger.exception("Initial refresh failed for source %s", source["id"])
+
+    # 立即在后台抓取新源，不等定时轮询的下一轮（避免「添加后显示尚未成功、手动刷新才更新」）。
+    Thread(target=first_fetch, daemon=True).start()
     return redirect(url_for("index", feed=row["id"]), code=303)
+
+
+@app.get("/feeds/<int:feed_id>/status")
+def feed_status(feed_id):
+    """供前端轮询首次同步结果：成功或失败后返回，前端据此刷新页面。"""
+    with closing(connect()) as conn:
+        row = conn.execute("SELECT updated, error FROM feeds WHERE id=?", (feed_id,)).fetchone()
+    if not row:
+        abort(404)
+    return jsonify(updated=bool(row["updated"]), error=row["error"] or "")
 
 
 @app.post("/refresh")
@@ -581,15 +820,17 @@ def article(entry_id):
 
 @app.get("/stats")
 def stats():
+    settings = get_settings()
+    days = setting_int(settings, "stats_days")
     with closing(connect()) as conn:
         sources = conn.execute("""
             SELECT f.title, f.kind, f.active,
-                count(e.id) FILTER (WHERE e.last_opened>=unixepoch()-30*86400) AS recent,
+                count(e.id) FILTER (WHERE e.last_opened>=unixepoch()-?) AS recent,
                 count(e.first_opened) AS total, coalesce(sum(e.opens), 0) AS opens
             FROM feeds f LEFT JOIN entries e ON e.feed_id=f.id
             GROUP BY f.id HAVING f.active=1 OR total>0 ORDER BY recent DESC, total DESC, f.title
-        """).fetchall()
-    return render_template("stats.html", sources=sources, total=sum(source["recent"] for source in sources))
+        """, (days * 86400,)).fetchall()
+    return render_template("stats.html", sources=sources, total=sum(source["recent"] for source in sources), days=days)
 
 
 if __name__ == "__main__":

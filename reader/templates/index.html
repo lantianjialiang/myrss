@@ -21,18 +21,27 @@
       </details>
     {% endif %}
     <a class="source {% if selected is none %}selected{% endif %}" href="{{ url_for('index', view=view, day=day or none) }}">
-      <span>全部订阅</span><span class="count" {% if not archive %}data-unread-count="all"{% endif %}>{{ feeds | sum(attribute='total' if archive else 'unread') }}</span>
+      <span>全部订阅</span>{% if archive or settings.show_unread == '1' %}<span class="count" {% if not archive %}data-unread-count="all"{% endif %}>{{ feeds | sum(attribute='total' if archive else 'unread') }}</span>{% endif %}
     </a>
     {% for group in feeds | groupby('kind') %}
-      <h3>{{ group.grouper }}</h3>
-      {% for source in group.list %}
-        <a class="source {% if selected == source.id %}selected{% endif %}" href="{{ url_for('index', feed=source.id, view=view, day=day or none) }}">
-          <span>{{ source.title }}{% if not source.active %} <small>已取消</small>{% endif %}</span>
-          <span class="count" {% if not archive %}data-unread-count="{{ source.id }}"{% endif %}>{{ source.total if archive else source.unread }}</span>
-        </a>
-        {% if not archive and source.error %}<p class="error">{{ source.error }}</p>{% endif %}
-        {% if not archive and not source.updated and not source.error %}<p class="muted source-note">等待首次同步</p>{% endif %}
-      {% endfor %}
+      {% set group_key = group.grouper | replace(' ', '_') %}
+      <section class="feed-group" data-group="{{ group_key }}">
+        <button type="button" class="group-head" data-group-toggle="{{ group_key }}" aria-expanded="true">
+          <span class="group-arrow" aria-hidden="true">▾</span>
+          <span class="group-name">{{ group.grouper }}</span>
+          <span class="group-count">{{ group.list | length }}</span>
+        </button>
+        <div class="group-items" data-group-items="{{ group_key }}">
+          {% for source in group.list %}
+            <a class="source {% if selected == source.id %}selected{% endif %}" href="{{ url_for('index', feed=source.id, view=view, day=day or none) }}">
+              <span>{{ source.title }}{% if not source.active %} <small>已取消</small>{% endif %}</span>
+              {% if archive or settings.show_unread == '1' %}<span class="count" {% if not archive %}data-unread-count="{{ source.id }}"{% endif %}>{{ source.total if archive else source.unread }}</span>{% endif %}
+            </a>
+            {% if not archive and source.error %}<p class="error">{{ source.error }}</p>{% endif %}
+            {% if not archive and not source.updated and not source.error %}<p class="muted source-note">等待首次同步</p>{% endif %}
+          {% endfor %}
+        </div>
+      </section>
     {% endfor %}
   </aside>
   <section class="stream" aria-label="{{ '订阅归档' if archive else '文章列表' }}">
@@ -82,7 +91,9 @@
             </form>
           {% endif %}
         </div>
-        {% if current %}<p class="muted sync-status">最近同步 {{ current.updated | localtime or '尚未成功' }}</p>{% endif %}
+        {% if current %}
+          <p class="muted sync-status" {% if not current.updated and not current.error %}data-sync-poll="{{ current.id }}"{% endif %}>最近同步 {{ current.updated | localtime or ('正在首次同步…' if not current.error else '尚未成功') }}</p>
+        {% endif %}
       {% endif %}
     </div>
     <div class="entries">

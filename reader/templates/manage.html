@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}批量管理订阅 · 我的 RSS{% endblock %}
+{% block main %}
+<div class="management">
+  <h1>批量管理订阅</h1>
+  <p><a href="{{ url_for('settings_page') }}">返回设置</a></p>
+  {% if message %}<p class="notice">{{ message }}</p>{% endif %}
+  <form method="post" action="{{ url_for('batch_feeds') }}" class="stack">
+    <input type="hidden" name="form_token" value="{{ form_token }}">
+    <div class="batch-actions">
+      <button name="action" value="pause">暂停所选</button>
+      <button name="action" value="resume">恢复所选</button>
+      <button name="action" value="delete" data-confirm="删除所选订阅及其全部文章，确定继续？">删除所选</button>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col"><input type="checkbox" id="select-all" aria-label="全选"></th><th scope="col">订阅</th><th scope="col">类型</th><th scope="col">文章</th><th scope="col">状态</th></tr></thead>
+      <tbody>
+      {% for feed in feeds %}
+        <tr>
+          <td><input type="checkbox" name="feed_ids" value="{{ feed.id }}" aria-label="选择 {{ feed.title }}"></td>
+          <th scope="row">{{ feed.title }}</th>
+          <td>{{ feed.kind }}</td>
+          <td>{{ feed.total }}</td>
+          <td>{{ '启用' if feed.active else '已暂停' }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5">还没有订阅。</td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </form>
+</div>
+{% endblock %}

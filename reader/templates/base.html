@@ -7,12 +7,13 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='reader.css') }}">
   <script defer src="{{ url_for('static', filename='reader.js') }}"></script>
 </head>
-<body>
+<body data-theme="{{ settings.theme if settings else 'light' }}">
   <header><nav aria-label="主导航"><a class="brand" href="{{ url_for('index') }}"><span class="brand-mark" aria-hidden="true"></span>我的 RSS</a>
     <a href="{{ url_for('index') }}" {% if request.endpoint == 'index' and view != 'archive' %}aria-current="page"{% endif %}>阅读</a>
     <a href="{{ url_for('index', view='archive') }}" {% if view == 'archive' %}aria-current="page"{% endif %}>归档</a>
+    <a href="{{ url_for('search') }}" {% if request.endpoint == 'search' %}aria-current="page"{% endif %}>搜索</a>
     <a href="{{ url_for('stats') }}" {% if request.endpoint == 'stats' %}aria-current="page"{% endif %}>统计</a>
-    <a href="{{ url_for('library') }}" {% if request.endpoint == 'library' %}aria-current="page"{% endif %}>导入与导出</a>
+    <a href="{{ url_for('settings_page') }}" {% if request.endpoint in ('settings_page', 'save_settings_page', 'manage_feeds') %}aria-current="page"{% endif %}>设置</a>
   </nav></header>
   <main>{% block main %}{% endblock %}</main>
 </body>
